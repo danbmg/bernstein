@@ -11,6 +11,9 @@
 .vscode
 *.pdf
 *.txt
+!poll-application/poll/requirements.txt
+__pycache__/
+*.pyc
 learning.md
 .discord.env
 zip/
