@@ -1,0 +1,87 @@
+# Environnement de test LOCAL uniquement (le vrai déploiement se fait sur Kubernetes).
+#
+# Usage :
+#   cp .env.example .env        # puis renseigner les mots de passe
+#   docker compose up --build
+#   Poll   -> http://localhost:8080
+#   Result -> http://localhost:8081
+#   docker compose down -v      # arrête tout et supprime la base
+
+name: poll-app
+
+x-postgres-env: &postgres-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: poll
+  POSTGRES_USER: poll
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD doit être défini (voir .env.example)}
+
+x-redis-env: &redis-env
+  REDIS_HOST: redis
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD doit être défini (voir .env.example)}
+
+services:
+  poll:
+    build: ./poll-application/poll
+    ports:
+      - "8080:80"
+    environment:
+      <<: *redis-env
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  result:
+    build: ./poll-application/result
+    ports:
+      - "8081:80"
+    environment:
+      <<: *postgres-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: ./poll-application/worker
+    environment:
+      <<: [*redis-env, *postgres-env]
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: poll
+      POSTGRES_USER: poll
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      # Postgres 18 : PGDATA est sous /var/lib/postgresql/18/docker, on monte le parent.
+      - db-data:/var/lib/postgresql
+      # Exécuté uniquement à la première initialisation (volume vide).
+      - ./poll-application/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      # -h 127.0.0.1 : passe par TCP, donc pas "healthy" pendant l'init (serveur temporaire sur socket uniquement).
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U poll -d poll"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  db-data:
