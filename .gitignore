@@ -22,7 +22,7 @@ zip/
 *gcno
 *gcda
 .clang-format
-build/
+start.md
 exit
 CLAUDE.md
 nanotekspice
