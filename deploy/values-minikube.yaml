@@ -1,0 +1,8 @@
+# Surcharges pour tester en local sur minikube (deploy/deploy.sh --local).
+# minikube n'a pas de load balancer cloud : poll et result sont exposés en NodePort (http://<minikube ip>:<port>).
+poll:
+  service:
+    type: NodePort
+result:
+  service:
+    type: NodePort
