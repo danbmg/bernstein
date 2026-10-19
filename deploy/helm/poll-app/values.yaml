@@ -1,0 +1,87 @@
+# Valeurs par défaut du chart poll-app (pensées pour AKS).
+# Les valeurs marquées (obligatoire) sont fournies par deploy/deploy.sh.
+
+image:
+  # (obligatoire) Registre privé où deploy/build-push.sh a poussé les images, ex : monacr.azurecr.io
+  registry: ""
+  # (obligatoire) Tag commun aux 3 images = SHA git du code de l'app. Jamais "latest" :
+  # chaque déploiement désigne une version précise, ce qui rend les mises à jour et les rollbacks fiables.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Libellés des 4 choix du sondage
+options:
+  a: Ansible
+  b: Chef
+  c: Puppet
+  d: SaltStack
+
+poll:
+  # 2 replicas minimum : un pod peut tomber ou être remplacé sans couper le service
+  replicas: 2
+  service:
+    type: LoadBalancer
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+result:
+  replicas: 2
+  service:
+    type: LoadBalancer
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+worker:
+  # 1 seul : deux workers en parallèle pourraient traiter dans le désordre deux votes successifs
+  # d'un même votant. Pendant un redémarrage, les votes attendent dans Redis : retard, mais ni erreur ni perte.
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+
+redis:
+  image: redis:8.10.2-alpine
+  # Vide = réutilise le mot de passe déjà présent dans le cluster, ou en génère un au premier déploiement
+  password: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+
+postgres:
+  image: postgres:18.6-alpine
+  database: poll
+  user: poll
+  # (obligatoire) Fourni par la variable d'environnement POSTGRES_PASSWORD au déploiement, jamais commité.
+  # N'est appliqué qu'à la création de la base : le changer ensuite ne change pas le mot de passe en base.
+  password: ""
+  # (obligatoire) Contenu de poll-application/schema.sql (--set-file), appliqué à la création de la base
+  schema: ""
+  storage:
+    size: 1Gi
+    # Vide = StorageClass par défaut du cluster (managed-csi sur AKS, standard sur minikube)
+    className: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi

@@ -1,0 +1,68 @@
+# Redis : file d'attente des votes (liste "votes") entre poll et worker.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    {{- include "poll-app.labels" (dict "root" $ "component" "redis") | nindent 4 }}
+spec:
+  replicas: 1
+  # Recreate : jamais deux Redis en même temps derrière le Service, sinon la file "votes" serait coupée en deux
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "poll-app.selectorLabels" (dict "root" $ "component" "redis") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "poll-app.labels" (dict "root" $ "component" "redis") | nindent 8 }}
+      annotations:
+        # Redémarre Redis si son mot de passe change
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") $ | sha256sum }}
+    spec:
+      # Pas de variables REDIS_PORT=tcp://... injectées pour chaque Service (elles entrent en conflit avec la config des apps)
+      enableServiceLinks: false
+      containers:
+        - name: redis
+          image: {{ .Values.redis.image }}
+          command: ["sh", "-c", 'exec redis-server --requirepass "$REDIS_PASSWORD"']
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: poll-app-secrets
+                  key: REDIS_PASSWORD
+            # Lu par redis-cli dans la readinessProbe
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: poll-app-secrets
+                  key: REDIS_PASSWORD
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli ping | grep -q PONG"]
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    {{- include "poll-app.labels" (dict "root" $ "component" "redis") | nindent 4 }}
+spec:
+  selector:
+    {{- include "poll-app.selectorLabels" (dict "root" $ "component" "redis") | nindent 4 }}
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis

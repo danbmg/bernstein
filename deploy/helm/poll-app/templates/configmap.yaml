@@ -1,0 +1,17 @@
+# Configuration non sensible de poll, result et worker (injectée avec envFrom).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: poll-app-config
+  labels:
+    {{- include "poll-app.labels" (dict "root" $ "component" "config") | nindent 4 }}
+data:
+  REDIS_HOST: redis
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: {{ .Values.postgres.database | quote }}
+  POSTGRES_USER: {{ .Values.postgres.user | quote }}
+  OPTION_A: {{ .Values.options.a | quote }}
+  OPTION_B: {{ .Values.options.b | quote }}
+  OPTION_C: {{ .Values.options.c | quote }}
+  OPTION_D: {{ .Values.options.d | quote }}

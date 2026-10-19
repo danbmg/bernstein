@@ -1,0 +1,62 @@
+# worker : vide la file Redis et enregistre les votes dans PostgreSQL.
+# Pas de Service : il ne reçoit aucun trafic (le port 80 ne sert qu'aux probes).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  labels:
+    {{- include "poll-app.labels" (dict "root" $ "component" "worker") | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "poll-app.selectorLabels" (dict "root" $ "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "poll-app.labels" (dict "root" $ "component" "worker") | nindent 8 }}
+      annotations:
+        # Redémarre les pods quand la config ou les mots de passe changent
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") $ | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: worker
+          image: {{ include "poll-app.image" (dict "root" $ "component" "worker") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: poll-app-config
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: poll-app-secrets
+                  key: REDIS_PASSWORD
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: poll-app-secrets
+                  key: POSTGRES_PASSWORD
+          ports:
+            - name: http
+              containerPort: 80
+          # /readyz : Redis et PostgreSQL joignables
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}

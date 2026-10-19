@@ -1,0 +1,5 @@
+apiVersion: v2
+name: poll-app
+description: Application Poll (poll, result, worker, Redis, PostgreSQL) du projet Bernstein
+type: application
+version: 0.1.0
