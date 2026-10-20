@@ -30,3 +30,4 @@ context.md
 Nts/file/
 rom.bin
 G-OOP-400_nanotekspice/
+*.env
