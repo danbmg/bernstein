@@ -24,12 +24,12 @@ if [[ -f "$SCRIPT_DIR/azure.env" ]]; then
 fi
 
 RESOURCE_GROUP="${RESOURCE_GROUP:-bernstein-rg}"
-LOCATION="${LOCATION:-francecentral}"
+LOCATION="${LOCATION:-denmarkeast}"
 AKS_NAME="${AKS_NAME:-bernstein-aks}"
 # Autoscaler de nœuds : NODE_COUNT au minimum (et au démarrage), NODE_MAX_COUNT au maximum
 NODE_COUNT="${NODE_COUNT:-2}"
 NODE_MAX_COUNT="${NODE_MAX_COUNT:-3}"
-NODE_SIZE="${NODE_SIZE:-Standard_B2s}"
+NODE_SIZE="${NODE_SIZE:-Standard_B2s_v2}"
 ACR_NAME="${ACR_NAME:-}"
 
 die() { echo "Erreur : $*" >&2; exit 1; }

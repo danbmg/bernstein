@@ -30,16 +30,18 @@ Usage : include "poll-app.image" (dict "root" $ "component" "poll")
 {{/*
 Mot de passe Redis : celui fourni, sinon celui déjà présent dans le cluster, sinon un nouveau.
 Réutiliser l'existant évite de changer de mot de passe (et de tout redémarrer) à chaque déploiement.
+Le choix est mémorisé dans .Values : ce helper est appelé plusieurs fois par déploiement (le Secret, puis
+les annotations checksum/secret). Tiré au hasard à chaque appel, il donnait aux pods une empreinte différente
+du Secret réel, et le déploiement suivant redémarrait Redis pour rien.
 */}}
 {{- define "poll-app.redisPassword" -}}
-{{- if .Values.redis.password -}}
-{{ .Values.redis.password }}
-{{- else -}}
+{{- if not .Values.redis.password -}}
 {{- $existing := lookup "v1" "Secret" .Release.Namespace "poll-app-secrets" -}}
 {{- if and $existing (index $existing.data "REDIS_PASSWORD") -}}
-{{ index $existing.data "REDIS_PASSWORD" | b64dec }}
+{{- $_ := set .Values.redis "password" (index $existing.data "REDIS_PASSWORD" | b64dec) -}}
 {{- else -}}
-{{ randAlphaNum 32 }}
+{{- $_ := set .Values.redis "password" (randAlphaNum 32) -}}
 {{- end -}}
 {{- end -}}
+{{ .Values.redis.password }}
 {{- end }}

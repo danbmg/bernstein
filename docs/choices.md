@@ -90,16 +90,18 @@ Pour poll et result, `replicas` n'est **pas** écrit dans le Deployment : c'est 
 
 ## 4. Nombre de nœuds
 
-**Choix** : **2 nœuds** `Standard_B2s` (2 vCPU, 4 Gio), avec l'**autoscaler de nœuds réglé de 2 à 3** (`azure.sh`, variables `NODE_COUNT` et `NODE_MAX_COUNT`).
+**Choix** : **2 nœuds** `Standard_B2s_v2` (2 vCPU, 8 Gio), dans la région `denmarkeast`, avec l'**autoscaler de nœuds réglé de 2 à 3** (`azure.sh`, variables `NODE_COUNT` et `NODE_MAX_COUNT`).
+
+Pourquoi des B2s_v2 : sur notre abonnement, la famille des B2s d'origine est limitée à 4 vCPU (`Standard BS Family vCPUs : 4`), soit 2 nœuds sans aucune marge. Les B2s_v2 appartiennent à une autre famille de VM.
 
 **Pourquoi au moins 2**
 - Avec 1 seul nœud, tout tombe avec lui : panne, `kubectl drain` ou mise à jour d'AKS.
 - L'anti-affinité ([9](#9-affinité)) n'a de sens qu'avec au moins 2 nœuds.
 
 **Pourquoi pas 3 en permanence**
-- **Ce n'est pas nécessaire** : nos requests au maximum (HPA à 4 + 4 : 1,05 CPU et 1,1 Gio) tiennent dans un seul nœud. Si un nœud est vidé, l'autre accueille tout.
+- **Ce n'est pas nécessaire.** Mesuré sur AKS : nos pods et ceux d'AKS demandent 1,9 CPU sur les 3,8 allouables du cluster. Lors des deux drains testés sur AKS, tout a tenu sur le nœud restant.
 - **Coût** : un 3e nœud, c'est +50 % de facture de calcul, pour des ressources qui resteraient inutilisées.
-- **Quota** : Azure for Students limite le nombre de vCPU par région (`az vm list-usage --location <région> -o table`). Une mise à jour d'AKS ajoute aussi un nœud temporaire, qui doit rentrer dans ce quota.
+- **Quota** : le quota régional de l'abonnement est de **6 vCPU** (4 déjà utilisés par nos 2 nœuds). 3 nœuds de 2 vCPU l'occupent entièrement. Or une mise à jour d'AKS ajoute un nœud temporaire : à 3 nœuds permanents, elle n'aurait plus de place. Vérification : `az vm list-usage --location denmarkeast -o table`.
 - **Pas de règle du nombre impair** : le « 3 nœuds pour le quorum » concerne etcd et le control plane. Sur AKS, c'est Azure qui les gère. Nos nœuds sont de simples workers, et 2 suffisent.
 
 **Avec 3 nœuds** : c'est possible sans rien changer au chart (`NODE_COUNT=3`). On gagne une chose : pendant la maintenance d'un nœud, il en reste 2, donc on garde la haute disponibilité.
@@ -123,6 +125,20 @@ Pour poll et result, `replicas` n'est **pas** écrit dans le Deployment : c'est 
 - **La startupProbe de Postgres** suspend la liveness pendant l'initialisation (initdb + `schema.sql`), qui peut prendre plus de temps qu'un démarrage normal. `pg_isready -h 127.0.0.1` passe par TCP : pendant l'init, le serveur temporaire n'écoute que sur un socket local, donc la probe échoue tant que le schéma n'est pas appliqué.
 
 **Compromis assumé** : si Redis est injoignable plus de 15 s (3 échecs × 5 s), tous les pods poll deviennent non prêts et la page de vote est indisponible. On préfère cela à une page qui s'affiche puis renvoie une erreur 500 au vote. Et c'est le prix de la protection pendant les mises à jour.
+
+**poll tourne avec 8 threads gunicorn** (correction après la recette sur AKS)
+- Le Dockerfile fourni lance gunicorn avec **un seul worker synchrone**, qui traite une connexion à la fois.
+- Sur AKS, poll se figeait par moments. Une connexion qui n'envoie rien, ou un `/readyz` qui attend Redis (jusqu'à 29 s, avec les nouvelles tentatives de la bibliothèque redis), bloquait tout le pod. `/healthz` ne répondait plus, et la liveness tuait le pod : `CrashLoopBackOff`, et 60 erreurs sur 350 requêtes pendant la mise à jour. result (Node.js) n'était pas touché, parce qu'il traite plusieurs connexions à la fois.
+- La correction ne touche pas au code : la variable `GUNICORN_CMD_ARGS="--threads 8"` dans le Deployment (`poll.gunicornArgs` dans `values.yaml`). gunicorn passe alors en worker `gthread`, et une connexion lente n'occupe qu'un thread.
+- **8 threads, et pas 4** : quand Redis est en panne, chaque `/readyz` dure ~30 s et le kubelet en lance un toutes les 5 s, donc jusqu'à 6 en même temps. Il reste des threads pour `/healthz` et pour les visiteurs.
+
+Testé sur k3s, avec un générateur de connexions muettes (une connexion ouverte toutes les 2 s, gardée 10 s sans rien envoyer) :
+
+| Test | 1 worker synchrone | 8 threads |
+|---|---|---|
+| Requêtes en continu pendant 60 s | 25 erreurs sur 152 requêtes, pods poll redémarrés | 0 erreur sur 3 949, aucun redémarrage |
+| Mise à jour du code pendant les requêtes | — | 0 erreur sur 4 528 |
+| Redis coupé pendant 60 s | — | poll non prêt (voulu), `/healthz` répond en 0,02 s, aucun redémarrage |
 
 ## 6. Restart policy
 
@@ -155,26 +171,30 @@ kubectl -n poll-app get pods -l app.kubernetes.io/name=worker    # RESTARTS = 1
 | request mémoire ≥ pic mesuré | un pod qui reste sous sa request n'est pas le premier évincé quand le nœud manque de mémoire |
 | limit mémoire ≈ 2 × request | de la marge pour les pics. Un dépassement signale une anomalie (fuite) : mieux vaut tuer le pod que le nœud |
 | request CPU petite | le CPU est compressible : un pod qui en manque ralentit, sans planter. C'est aussi le seuil du HPA |
-| limit CPU | les B2s sont des VM « burstable » : en continu, elles ne garantissent que l'équivalent de 0,4 vCPU, et tout dépassement consomme des crédits CPU. Sans plafond, un seul pod pourrait épuiser ces crédits au détriment des autres |
+| limit CPU | les B2s_v2 sont des VM « burstable » : en continu, elles ne garantissent qu'une fraction de leurs 2 vCPU, et tout dépassement consomme des crédits CPU. Sans plafond, un seul pod pourrait épuiser ces crédits au détriment des autres |
 
 **Mesures et valeurs retenues**
 
 | Service | Mémoire repos → pic | CPU pic (sans limite) | requests (CPU / mém.) | limits (CPU / mém.) | Raison spécifique |
 |---|---|---|---|---|---|
-| poll | 42 → 49 Mi | 0,9 cœur | 100m / 64Mi | 500m / 128Mi | à 0,5 CPU, un pod tient **220 votes/s** |
+| poll | 42 → 49 Mi (44 → 51 Mi avec 8 threads) | 0,9 cœur | 100m / 64Mi | 500m / 128Mi | à 0,5 CPU, un pod tient **220 votes/s** |
 | result | 31 → 120 Mi | 1,45 cœur | 100m / 128Mi | 500m / 256Mi | à 0,5 CPU, **2 900 req/s** |
 | worker | 70 → 114 Mi | 0,2 cœur | 100m / 192Mi | 1000m / 512Mi | la JVM prend 25 % de la limite pour son tas (128 Mi), plus ~60 Mi hors tas. 1 CPU pour accélérer son démarrage (JIT) |
 | redis | 6 → 9 Mi | 0,16 cœur | 50m / 32Mi | 250m / 128Mi | mesuré : **1 million de votes en file = 62 Mo**. La limite absorbe une longue panne du worker |
 | postgres | 36 → 38 Mi | 0,2 cœur | 100m / 128Mi | 1000m / 512Mi | son cache (`shared_buffers`) fait 128 Mo par défaut et se remplit avec les données |
 
-**Budget** : un B2s offre environ 1,9 CPU et 2,7 Gio allouables. AKS garde le reste pour le système, et ses propres pods en consomment une partie : chiffres exacts avec `kubectl describe node`, sections *Allocatable* et *Allocated resources*.
+**Vérifié sur AKS** : au repos, poll consomme 42 Mi, result 22 Mi, worker 43 Mi, postgres 36 Mi et redis 3 Mi. Tous restent sous leur request.
 
-| Situation | CPU demandé | Mémoire demandée |
+**Budget**, mesuré sur AKS (`kubectl describe node`, sections *Allocatable* et *Allocated resources*) :
+- un nœud B2s_v2 offre **1,9 CPU et 5,65 Gio allouables** ; AKS garde le reste pour le système ;
+- avec les pods d'AKS, les deux nœuds avaient 1,13 et 0,79 CPU demandés (59 % et 41 %).
+
+| Situation | CPU demandé par nos pods | Mémoire demandée |
 |---|---|---|
 | Normal (2 poll, 2 result) | 0,65 CPU | 736 Mi |
 | HPA au maximum (4 poll, 4 result) | 1,05 CPU | 1 120 Mi |
 
-Même au maximum, tout tient sur **un** nœud. Tous nos pods sont en QoS `Burstable` (requests < limits).
+En temps normal, tout tient sur **un** nœud : vérifié lors des drains sur AKS. Si un drain arrive pendant que le HPA est au maximum, les pods d'AKS en plus pourraient dépasser 1,9 CPU sur le nœud restant. C'est le cas où l'autoscaler ajoute le 3e nœud. Tous nos pods sont en QoS `Burstable` (requests < limits).
 
 **Limiter le CPU de Redis** (question classique) : c'est `redis.resources.limits.cpu` dans `values.yaml`, puis `deploy/deploy.sh`. Ou à chaud : `kubectl -n poll-app set resources deploy/redis --limits=cpu=100m`, écrasé au prochain déploiement Helm.
 
@@ -290,7 +310,7 @@ Une suite de mécanismes, chacun couvrant un moment de la mise à jour :
 | `preStop: sleep 10` | poll, result | des requêtes envoyées à un pod déjà arrêté. Le retrait d'un pod des Services met un moment à se propager à tous les nœuds et au load balancer. Pendant ces 10 s, le pod continue de répondre |
 | `terminationGracePeriodSeconds: 30` | poll, result | couper les requêtes en cours : après le preStop, il reste 20 s pour finir |
 | `helm --rollback-on-failure` (`--atomic` en Helm 3) | `deploy.sh` | rester sur une version cassée : si les nouveaux pods ne sont pas prêts en 10 min, Helm revient à la version précédente |
-| Annotations `checksum/config` et `checksum/secret` | Deployments | des pods qui gardent une ancienne config après un changement de ConfigMap ou de Secret |
+| Annotations `checksum/config` et `checksum/secret` | Deployments | des pods qui gardent une ancienne config après un changement de ConfigMap ou de Secret. Le mot de passe Redis généré n'est tiré qu'une fois par déploiement : sinon l'empreinte différait du vrai Secret, et la mise à jour suivante redémarrait Redis pour rien (vu sur AKS, corrigé dans `_helpers.tpl`) |
 | PodDisruptionBudget `minAvailable: 1` | poll, result | un drain ou une maintenance d'AKS qui évince toutes les replicas en même temps |
 
 **Testé** sur un cluster k3s local de 2 nœuds : code de poll et de result modifié, puis redéploiement avec la même commande Helm que `deploy.sh`.
@@ -305,6 +325,8 @@ Une suite de mécanismes, chacun couvrant un moment de la mise à jour :
 
 Le preStop divise les erreurs par 7 sous forte concurrence. Ce qui reste vient surtout de la saturation volontaire des pods.
 
+**Sur AKS**, le premier essai (22/10) a donné 60 erreurs sur 350 requêtes, toutes sur poll, à cause de son worker gunicorn unique ([§ 5](#5-probes)). Après la correction, le même scénario sur k3s, avec des connexions muettes en plus, donne 0 erreur sur 4 528 requêtes.
+
 Sur ce cluster local, la boucle de requêtes successives (le test de la soutenance) donnait aussi 0 erreur **sans** preStop : sur une seule machine, le retrait d'un pod se propage presque instantanément. Sur AKS, il faut en plus prévenir le kube-proxy de chaque VM et le load balancer Azure. C'est ce délai que le preStop couvre.
 
 Comme les 3 images partagent le même tag, modifier un seul service redémarre aussi les deux autres. C'est sans coupure, mais un peu plus long.
@@ -313,11 +335,11 @@ Comme les 3 images partagent le même tag, modifier un seul service redémarre a
 
 | Scénario | Ce qui se passe |
 |---|---|
-| `kubectl drain <nœud>` | Le PDB n'autorise l'éviction d'un pod poll ou result que s'il en reste un autre prêt. L'anti-affinité garantit que ce pod est sur l'autre nœud. Les pods évincés sont recréés sur le nœud restant. **Testé : 0 erreur.** Les pods ne reviennent pas d'eux-mêmes après `kubectl uncordon` : il faut un `kubectl rollout restart` pour rééquilibrer. |
+| `kubectl drain <nœud>` | Le PDB n'autorise l'éviction d'un pod poll ou result que s'il en reste un autre prêt. L'anti-affinité garantit que ce pod est sur l'autre nœud. Les pods évincés sont recréés sur le nœud restant. **Testé sur k3s : 0 erreur.** Sur AKS, les PDB des pods système (coredns, metrics-server, konnectivity) font patienter le drain quelques dizaines de secondes (`Cannot evict pod as it would violate the pod's disruption budget`, puis nouvelle tentative) : c'est le même mécanisme que le nôtre. Les pods ne reviennent pas d'eux-mêmes après `kubectl uncordon` : il faut un `kubectl rollout restart` pour rééquilibrer. |
 | Drain du nœud de Redis | Redis est recréé ailleurs en quelques secondes (pas de disque à déplacer). Pendant ce temps, les votes échouent. Au-delà de 15 s, poll devient non prêt ([5](#5-probes)). |
-| Drain du nœud de Postgres | `postgres-0` est recréé ailleurs, et le disque Azure est détaché puis rattaché. En attendant, result et worker sont non prêts, et les votes s'accumulent dans Redis sans être perdus. |
+| Drain du nœud de Postgres | `postgres-0` est recréé ailleurs, et le disque Azure est détaché puis rattaché. **Mesuré sur AKS** : `postgres-0` prêt sur l'autre nœud 85 s après le début du drain, dont 15 s à attendre la libération du disque (`Multi-Attach error`). result a été injoignable environ 30 s ; les votes ont attendu dans Redis. |
 | Le worker plante | Le kubelet le redémarre (`restartPolicy: Always`) ; les votes attendent dans Redis. **Testé.** |
-| `kubectl delete pod postgres-0` | Recréé sur le même PVC, sans perte de données. **Testé.** |
+| `kubectl delete pod postgres-0` | Recréé sur le même PVC, sans perte de données. **Testé sur AKS : prêt en 10 s.** |
 | Un nœud s'éteint | En moins d'une minute, il est déclaré `NotReady` et ses pods sont retirés des Services : les replicas de l'autre nœud prennent tout le trafic. Après 5 min, ces pods sont recréés ailleurs. Si l'autre nœud manque de place, l'autoscaler ajoute un nœud. |
 | Pic de trafic | Le HPA monte jusqu'à 4 pods. **Testé : 2 → 4.** |
 
@@ -347,5 +369,4 @@ Ce qu'on a choisi de ne pas faire, en connaissance de cause :
 | Redis sans persistance | perte des votes en attente si Redis redémarre (presque toujours 0) | `appendonly yes` + PVC, au prix d'un redémarrage plus lent |
 | Conteneurs en root | une faille dans une app donnerait root dans son conteneur | modifier les apps pour écouter sur un port > 1024 et ajouter `runAsNonRoot` (hors périmètre : on ne modifie pas `poll-application/`) |
 | Pas de NetworkPolicy | depuis le cluster, tout pod peut joindre Redis et Postgres (les mots de passe restent nécessaires) | activer un moteur de NetworkPolicy à la création d'AKS (Azure NPM, Cilium ou Calico), puis tout interdire sauf les flux utiles |
-| poll lancé par gunicorn avec **1 seul worker synchrone** (Dockerfile fourni) | une requête bloquée (ex. `/readyz` qui attend un DNS en panne) bloque tout le pod, y compris `/healthz`. Observé en test avec un CoreDNS unique ; sans effet sur AKS, où CoreDNS a 2 replicas | variable `GUNICORN_CMD_ARGS="--threads 4"` dans le Deployment |
 | Un tag commun aux 3 images | modifier un service redémarre les trois | un tag par service (SHA du dossier) |

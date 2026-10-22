@@ -20,6 +20,11 @@ options:
 # requests = ce que le scheduler réserve sur le nœud ; limits = plafond (CPU ralenti, mémoire : pod tué).
 
 poll:
+  # Options ajoutées à la commande gunicorn du Dockerfile (variable GUNICORN_CMD_ARGS).
+  # Par défaut, gunicorn n'a qu'un worker synchrone : une connexion qui n'envoie rien, ou un /readyz qui attend
+  # Redis (jusqu'à ~30 s), bloque tout le pod, puis la liveness le tue. 8 threads : un /readyz bloqué toutes
+  # les 5 s pendant 30 s en occupe au plus 6, il en reste pour les visiteurs et /healthz.
+  gunicornArgs: "--threads 8"
   # Nombre de pods piloté par le HPA (HorizontalPodAutoscaler) selon le CPU consommé
   autoscaling:
     # 2 minimum : un pod peut tomber ou être remplacé sans couper le service
