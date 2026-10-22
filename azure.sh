@@ -5,7 +5,7 @@
 # Usage : ./azure.sh <commande>
 #
 #   up      Crée le resource group, l'ACR (registry privé) et l'AKS (cluster),
-#           relie l'ACR à l'AKS et récupère le kubeconfig. Idempotent.
+#           relie l'ACR à l'AKS, règle l'autoscaler de nœuds et récupère le kubeconfig. Idempotent.
 #   creds   (Re)récupère le kubeconfig du cluster pour kubectl.
 #   stop    Arrête le cluster (plus de coût de calcul tant qu'il est arrêté).
 #   start   Redémarre le cluster.
@@ -26,7 +26,9 @@ fi
 RESOURCE_GROUP="${RESOURCE_GROUP:-bernstein-rg}"
 LOCATION="${LOCATION:-francecentral}"
 AKS_NAME="${AKS_NAME:-bernstein-aks}"
+# Autoscaler de nœuds : NODE_COUNT au minimum (et au démarrage), NODE_MAX_COUNT au maximum
 NODE_COUNT="${NODE_COUNT:-2}"
+NODE_MAX_COUNT="${NODE_MAX_COUNT:-3}"
 NODE_SIZE="${NODE_SIZE:-Standard_B2s}"
 ACR_NAME="${ACR_NAME:-}"
 
@@ -38,6 +40,7 @@ check_prereqs() {
   az account show >/dev/null 2>&1 || die "Non connecté à Azure : lance 'az login'."
   [[ -n "$ACR_NAME" ]] || die "ACR_NAME non défini (dans azure.env). Nom unique, minuscules et chiffres uniquement."
   [[ "$ACR_NAME" =~ ^[a-z0-9]{5,50}$ ]] || die "ACR_NAME invalide : 5 à 50 caractères, minuscules et chiffres uniquement."
+  (( NODE_MAX_COUNT >= NODE_COUNT )) || die "NODE_MAX_COUNT ($NODE_MAX_COUNT) doit être >= NODE_COUNT ($NODE_COUNT)."
 }
 
 cmd_up() {
@@ -69,13 +72,31 @@ cmd_up() {
       --name "$AKS_NAME" \
       --attach-acr "$ACR_NAME" \
       --output none
+
+    # --enable-... échoue si l'autoscaler est déjà actif : on passe alors par --update-...
+    local autoscaler_flag=--enable-cluster-autoscaler
+    if [[ "$(az aks show --resource-group "$RESOURCE_GROUP" --name "$AKS_NAME" \
+          --query 'agentPoolProfiles[0].enableAutoScaling' -o tsv)" == "true" ]]; then
+      autoscaler_flag=--update-cluster-autoscaler
+    fi
+    log "Autoscaler de nœuds : $NODE_COUNT à $NODE_MAX_COUNT nœuds"
+    az aks update \
+      --resource-group "$RESOURCE_GROUP" \
+      --name "$AKS_NAME" \
+      "$autoscaler_flag" \
+      --min-count "$NODE_COUNT" \
+      --max-count "$NODE_MAX_COUNT" \
+      --output none
   else
-    log "Création de l'AKS '$AKS_NAME' ($NODE_COUNT x $NODE_SIZE) — compter 5 à 10 minutes"
+    log "Création de l'AKS '$AKS_NAME' ($NODE_COUNT à $NODE_MAX_COUNT x $NODE_SIZE) — compter 5 à 10 minutes"
     az aks create \
       --resource-group "$RESOURCE_GROUP" \
       --name "$AKS_NAME" \
       --tier free \
       --node-count "$NODE_COUNT" \
+      --enable-cluster-autoscaler \
+      --min-count "$NODE_COUNT" \
+      --max-count "$NODE_MAX_COUNT" \
       --node-vm-size "$NODE_SIZE" \
       --enable-managed-identity \
       --attach-acr "$ACR_NAME" \
@@ -118,7 +139,7 @@ cmd_start() {
 cmd_status() {
   log "Cluster"
   az aks show --resource-group "$RESOURCE_GROUP" --name "$AKS_NAME" \
-    --query "{etat:powerState.code, version:kubernetesVersion, noeuds:agentPoolProfiles[0].count, taille:agentPoolProfiles[0].vmSize}" \
+    --query "{etat:powerState.code, version:kubernetesVersion, noeuds:agentPoolProfiles[0].count, min:agentPoolProfiles[0].minCount, max:agentPoolProfiles[0].maxCount, taille:agentPoolProfiles[0].vmSize}" \
     --output table || echo "Cluster introuvable."
   log "Ressources du groupe '$RESOURCE_GROUP'"
   az resource list --resource-group "$RESOURCE_GROUP" --query "[].{nom:name, type:type}" --output table || true

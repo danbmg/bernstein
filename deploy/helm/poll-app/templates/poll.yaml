@@ -6,7 +6,10 @@ metadata:
   labels:
     {{- include "poll-app.labels" (dict "root" $ "component" "poll") | nindent 4 }}
 spec:
-  replicas: {{ .Values.poll.replicas }}
+  # Pas de "replicas" : le HPA (plus bas) fixe le nombre de pods. S'il était écrit ici,
+  # chaque helm upgrade le remettrait à cette valeur et annulerait le travail du HPA.
+  # Un pod doit rester prêt 5 s avant de compter comme disponible (évite d'avancer sur un pod qui plante aussitôt)
+  minReadySeconds: 5
   # Mise à jour progressive : un nouveau pod doit être prêt avant qu'un ancien soit retiré
   strategy:
     type: RollingUpdate
@@ -25,6 +28,25 @@ spec:
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") $ | sha256sum }}
     spec:
       enableServiceLinks: false
+      # Un conteneur arrêté (crash, liveness en échec) est toujours relancé. Seule valeur permise dans un Deployment.
+      restartPolicy: Always
+      # Délai total entre la demande d'arrêt et l'arrêt forcé (SIGKILL), preStop compris
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          # Les pods poll sont placés de préférence sur des nœuds différents : la panne d'un nœud n'en coupe qu'une partie.
+          # "preferred" et pas "required" : avec 2 nœuds, un 3e pod (rolling update, HPA) doit quand même pouvoir démarrer.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "poll-app.selectorLabels" (dict "root" $ "component" "poll") | nindent 20 }}
+                # Ne compte que les pods de la même version. Sinon, pendant un rolling update, les anciens pods
+                # (encore là) poussent tous les nouveaux sur le même nœud, et ils y restent une fois les anciens partis.
+                matchLabelKeys:
+                  - pod-template-hash
       containers:
         - name: poll
           image: {{ include "poll-app.image" (dict "root" $ "component" "poll") }}
@@ -52,6 +74,12 @@ spec:
               path: /healthz
               port: http
             periodSeconds: 10
+          lifecycle:
+            # Un pod qui s'arrête est retiré des Services, mais les nœuds et le load balancer l'apprennent
+            # avec un peu de retard. Il continue donc à répondre 10 s avant de recevoir SIGTERM.
+            preStop:
+              exec:
+                command: ["sleep", "10"]
           resources:
             {{- toYaml .Values.poll.resources | nindent 12 }}
 ---
@@ -69,3 +97,39 @@ spec:
     - name: http
       port: 80
       targetPort: http
+---
+# Ajuste le nombre de pods selon le CPU moyen consommé (mesuré par metrics-server, présent par défaut sur AKS)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: poll
+  labels:
+    {{- include "poll-app.labels" (dict "root" $ "component" "poll") | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: poll
+  minReplicas: {{ .Values.poll.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.poll.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.poll.autoscaling.targetCPUUtilizationPercentage }}
+---
+# Pendant un "kubectl drain" ou une mise à jour des nœuds, Kubernetes n'évince un pod poll
+# que s'il en reste au moins un autre prêt
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: poll
+  labels:
+    {{- include "poll-app.labels" (dict "root" $ "component" "poll") | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "poll-app.selectorLabels" (dict "root" $ "component" "poll") | nindent 6 }}

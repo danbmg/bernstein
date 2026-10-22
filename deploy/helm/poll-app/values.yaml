@@ -16,27 +16,39 @@ options:
   c: Puppet
   d: SaltStack
 
+# Ressources : valeurs mesurées sous charge, le calcul est détaillé dans docs/choices.md.
+# requests = ce que le scheduler réserve sur le nœud ; limits = plafond (CPU ralenti, mémoire : pod tué).
+
 poll:
-  # 2 replicas minimum : un pod peut tomber ou être remplacé sans couper le service
-  replicas: 2
+  # Nombre de pods piloté par le HPA (HorizontalPodAutoscaler) selon le CPU consommé
+  autoscaling:
+    # 2 minimum : un pod peut tomber ou être remplacé sans couper le service
+    minReplicas: 2
+    # 4 maximum : tout tient encore sur un seul nœud si l'autre est vidé (kubectl drain)
+    maxReplicas: 4
+    # Ajoute un pod quand la moyenne dépasse 70 % de requests.cpu
+    targetCPUUtilizationPercentage: 70
   service:
     type: LoadBalancer
   resources:
     requests:
-      cpu: 50m
+      cpu: 100m
       memory: 64Mi
     limits:
       cpu: 500m
-      memory: 256Mi
+      memory: 128Mi
 
 result:
-  replicas: 2
+  autoscaling:
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
   service:
     type: LoadBalancer
   resources:
     requests:
-      cpu: 50m
-      memory: 64Mi
+      cpu: 100m
+      memory: 128Mi
     limits:
       cpu: 500m
       memory: 256Mi
@@ -46,9 +58,11 @@ worker:
   # d'un même votant. Pendant un redémarrage, les votes attendent dans Redis : retard, mais ni erreur ni perte.
   replicas: 1
   resources:
+    # La JVM prend 25 % de la limite mémoire pour son tas (128 Mi), plus ~60 Mi hors tas
     requests:
       cpu: 100m
       memory: 192Mi
+    # 1 CPU : la JVM démarre plus vite (compilation JIT sur plusieurs threads)
     limits:
       cpu: 1000m
       memory: 512Mi
@@ -61,6 +75,7 @@ redis:
     requests:
       cpu: 50m
       memory: 32Mi
+    # 128 Mi : de quoi garder environ un million de votes en attente si le worker est arrêté
     limits:
       cpu: 250m
       memory: 128Mi
@@ -79,6 +94,7 @@ postgres:
     # Vide = StorageClass par défaut du cluster (managed-csi sur AKS, standard sur minikube)
     className: ""
   resources:
+    # 128 Mi : taille du cache de Postgres par défaut (shared_buffers), rempli au fil des lectures
     requests:
       cpu: 100m
       memory: 128Mi

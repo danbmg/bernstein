@@ -67,6 +67,9 @@ else
     minikube status >/dev/null 2>&1 || { log "Démarrage de minikube"; minikube start >&2; }
     KUBE_CONTEXT=minikube
 
+    # Le HPA lit le CPU des pods via metrics-server : présent par défaut sur AKS, pas sur minikube
+    minikube addons enable metrics-server >&2
+
     # Registre privé interne au cluster (addon minikube). Il n'est joignable que depuis le cluster :
     # on l'ouvre sur localhost:5000 le temps du push. Les nœuds le voient eux aussi sous localhost:5000.
     log "Registre interne de minikube"

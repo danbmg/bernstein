@@ -38,7 +38,15 @@ cp azure.env.example azure.env
 ./azure.sh up
 ```
 
-Crée le resource group, le registry privé (ACR), le cluster (AKS), relie les deux et configure `kubectl`. Le script est idempotent : le relancer ne recrée rien.
+Crée le resource group, le registry privé (ACR) et le cluster (AKS), relie les deux et configure `kubectl`. Le script est idempotent : le relancer ne recrée rien.
+
+Le cluster démarre avec 2 nœuds `Standard_B2s`. L'**autoscaler de nœuds** peut monter à 3 (`NODE_COUNT` et `NODE_MAX_COUNT` dans `azure.env`) :
+- il ajoute un nœud seulement si des pods ne trouvent plus de place ;
+- il le retire une fois devenu inutile.
+
+Sur un cluster déjà créé, relancer `./azure.sh up` active ou met à jour l'autoscaler. Le pourquoi de ces chiffres est dans [docs/choices.md § 4](docs/choices.md#4-nombre-de-nœuds).
+
+Avant de monter `NODE_MAX_COUNT`, vérifier le quota de vCPU de l'abonnement : `az vm list-usage --location francecentral -o table`. Un B2s compte 2 vCPU, et une mise à jour d'AKS ajoute temporairement un nœud.
 
 Si vous avez déjà un cluster AKS prêt, renseignez simplement `RESOURCE_GROUP`, `AKS_NAME` et `ACR_NAME` dans `azure.env`, puis lancez `./azure.sh creds`.
 
@@ -48,7 +56,7 @@ Si vous avez déjà un cluster AKS prêt, renseignez simplement `RESOURCE_GROUP`
 |---|---|
 | `./azure.sh stop` | Arrête le cluster : plus de facturation des nœuds |
 | `./azure.sh start` | Redémarre le cluster et reconfigure `kubectl` |
-| `./azure.sh status` | État du cluster et liste des ressources |
+| `./azure.sh status` | État du cluster (nombre de nœuds, bornes de l'autoscaler) et liste des ressources |
 | `./azure.sh down` | Supprime tout le resource group (irréversible, demande confirmation) |
 
 Une alerte budgétaire est configurée sur l'abonnement (portail Azure → *Budgets*) pour être prévenu en cas de dépense anormale.
