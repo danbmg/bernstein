@@ -60,6 +60,9 @@ spec:
                 secretKeyRef:
                   name: poll-app-secrets
                   key: REDIS_PASSWORD
+            # Lu par gunicorn au démarrage : des threads au lieu d'un seul worker synchrone (voir values.yaml)
+            - name: GUNICORN_CMD_ARGS
+              value: {{ .Values.poll.gunicornArgs | quote }}
           ports:
             - name: http
               containerPort: 80
