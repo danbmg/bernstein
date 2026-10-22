@@ -6,7 +6,8 @@ metadata:
   labels:
     {{- include "poll-app.labels" (dict "root" $ "component" "result") | nindent 4 }}
 spec:
-  replicas: {{ .Values.result.replicas }}
+  # Pas de "replicas" : le HPA (plus bas) fixe le nombre de pods
+  minReadySeconds: 5
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -24,6 +25,21 @@ spec:
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") $ | sha256sum }}
     spec:
       enableServiceLinks: false
+      restartPolicy: Always
+      # node tourne en PID 1 sans gérer SIGTERM : il ignore le signal et n'est arrêté (SIGKILL) qu'au bout de ce délai.
+      # Sans conséquence pour les clients : grâce au preStop, il ne reçoit déjà plus de trafic.
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "poll-app.selectorLabels" (dict "root" $ "component" "result") | nindent 20 }}
+                matchLabelKeys:
+                  - pod-template-hash
       containers:
         - name: result
           image: {{ include "poll-app.image" (dict "root" $ "component" "result") }}
@@ -51,6 +67,10 @@ spec:
               path: /healthz
               port: http
             periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
           resources:
             {{- toYaml .Values.result.resources | nindent 12 }}
 ---
@@ -71,3 +91,36 @@ spec:
     - name: http
       port: 80
       targetPort: http
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: result
+  labels:
+    {{- include "poll-app.labels" (dict "root" $ "component" "result") | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: result
+  minReplicas: {{ .Values.result.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.result.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.result.autoscaling.targetCPUUtilizationPercentage }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: result
+  labels:
+    {{- include "poll-app.labels" (dict "root" $ "component" "result") | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "poll-app.selectorLabels" (dict "root" $ "component" "result") | nindent 6 }}

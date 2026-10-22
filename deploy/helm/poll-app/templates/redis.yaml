@@ -23,6 +23,7 @@ spec:
     spec:
       # Pas de variables REDIS_PORT=tcp://... injectées pour chaque Service (elles entrent en conflit avec la config des apps)
       enableServiceLinks: false
+      restartPolicy: Always
       containers:
         - name: redis
           image: {{ .Values.redis.image }}

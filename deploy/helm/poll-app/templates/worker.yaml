@@ -26,6 +26,8 @@ spec:
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") $ | sha256sum }}
     spec:
       enableServiceLinks: false
+      # Le worker s'arrête (exit 1) à la moindre erreur Redis ou PostgreSQL et compte sur ce redémarrage
+      restartPolicy: Always
       containers:
         - name: worker
           image: {{ include "poll-app.image" (dict "root" $ "component" "worker") }}
