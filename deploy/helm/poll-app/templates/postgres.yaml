@@ -62,6 +62,7 @@ spec:
         {{- include "poll-app.labels" (dict "root" $ "component" "postgres") | nindent 8 }}
     spec:
       enableServiceLinks: false
+      restartPolicy: Always
       containers:
         - name: postgres
           image: {{ .Values.postgres.image }}
