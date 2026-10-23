@@ -105,7 +105,7 @@ Le rollback est lui aussi un rolling update : il se fait sans coupure. Les ancie
 |---|---|
 | Registre privé | `az acr repository list --name $ACR_NAME -o table`, puis `docker logout $ACR_NAME.azurecr.io && docker pull $ACR_NAME.azurecr.io/poll:<tag>` (réponse : `unauthorized`) |
 | Répartition de charge | `for i in $(seq 20); do curl -s http://<IP_POLL> \| grep -o 'poll-[a-z0-9]*-[a-z0-9]*'; done \| sort \| uniq -c` |
-| Auto-scaling | `kubectl -n poll-app run load --image=busybox:1.37 --restart=Never -- sh -c 'while true; do wget -q -O /dev/null http://poll; done'`, puis `kubectl -n poll-app get hpa -w` (2 → 4 pods). Fin : `kubectl -n poll-app delete pod load` |
+| Auto-scaling | `kubectl -n poll-app run load --image=busybox:1.37 --restart=Never -- sh -c 'fin=$(( $(date +%s) + 180 )); while [ "$(date +%s)" -lt "$fin" ]; do wget -q -O /dev/null http://poll; done'`, puis `kubectl -n poll-app get hpa -w` : 2 → 3 pods, puis retour à 2 environ 6 min après la fin de la charge, qui s'arrête seule au bout de 3 min. Ménage : `kubectl -n poll-app delete pod load` |
 | Persistance | `kubectl -n poll-app delete pod postgres-0` : les votes sont toujours là |
 | Restart policy | `kubectl -n poll-app exec deploy/worker -- kill 1`, puis `RESTARTS` passe à 1 |
 | Drain d'un nœud | `kubectl drain <nœud> --ignore-daemonsets --delete-emptydir-data` pendant `test-zero-downtime.sh`, puis `kubectl uncordon <nœud>` |

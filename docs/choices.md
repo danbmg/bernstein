@@ -74,6 +74,8 @@ kubectl -n poll-app exec postgres-0 -- sh -c 'psql -U "$POSTGRES_USER" -d "$POST
 kubectl -n poll-app delete pod postgres-0      # le StatefulSet le recrée sur le même PVC
 # même requête : mêmes chiffres
 ```
+**Vérifié sur AKS** : les votes du 22/10 étaient toujours là le 23/10, après un arrêt complet du cluster (`./azure.sh stop` éteint les VM, `start` les rallume, et le disque est rebranché à `postgres-0`).
+
 `helm uninstall` **garde** le PVC : les données survivent à une désinstallation. Seul `kubectl delete namespace poll-app` (ou `kubectl delete pvc`) les efface.
 
 ## 3. Replicas
@@ -139,6 +141,8 @@ Testé sur k3s, avec un générateur de connexions muettes (une connexion ouvert
 | Requêtes en continu pendant 60 s | 25 erreurs sur 152 requêtes, pods poll redémarrés | 0 erreur sur 3 949, aucun redémarrage |
 | Mise à jour du code pendant les requêtes | — | 0 erreur sur 4 528 |
 | Redis coupé pendant 60 s | — | poll non prêt (voulu), `/healthz` répond en 0,02 s, aucun redémarrage |
+
+**Vérifié sur AKS (23/10)** : `Using worker: gthread` dans les logs de poll, et aucun redémarrage de toute la recette.
 
 ## 6. Restart policy
 
@@ -268,6 +272,7 @@ Internet ─► Load balancer Azure (L4) ─► un nœud (port du Service) ─�
 kubectl -n poll-app get svc                                  # EXTERNAL-IP de poll et de result
 for i in $(seq 20); do curl -s http://<IP_POLL> | grep -o 'poll-[a-z0-9]*-[a-z0-9]*'; done | sort | uniq -c
 ```
+**Vérifié sur AKS (23/10)** : 6 et 14 réponses sur 20 pour les deux pods poll. kube-proxy tire au hasard, donc un écart de cet ordre sur 20 requêtes est normal. Dans le navigateur, aucune erreur 400 Socket.IO sur result.
 
 ## 11. Auto-scaling
 
@@ -289,12 +294,18 @@ Deux niveaux qui se complètent :
 - **Pourquoi 4 au maximum** : à 220 votes/s par pod, 4 pods dépassent déjà largement le débit du worker unique. Et tout tient sur un nœud ([4](#4-nombre-de-nœuds)).
 - **Le worker n'a pas de HPA** : son CPU ne reflète pas la file d'attente, et il doit rester seul ([3](#3-replicas)). L'outil adapté serait KEDA (scaling sur la longueur de la liste Redis), si l'ordre des votes n'importait pas.
 
-**Le montrer** (testé : le HPA monte de 2 à 4 pods sous cette charge)
+**Testé sur AKS (23/10)** : sous la charge ci-dessous, poll est passé de 2 à 3 pods en 1 min 40 s, avec un CPU à 98 %.
+- **Pourquoi 3 et pas 4** : ⌈ 2 × 98 / 70 ⌉ = ⌈ 2,8 ⌉ = 3. Avec 3 pods, la même charge donne 72 %. L'écart avec 70 % est sous la tolérance de 10 %, donc le HPA ne bouge plus : il a trouvé le nombre de pods qui ramène le CPU près de la cible.
+- Sur k3s, le même test était monté à 4 : la charge que produit une seule boucle dépend de la machine.
+- **La descente** a été observée sur k3s : retour à 2 pods 5 min 20 s après la fin de la charge. Sur AKS, elle n'a pas pu l'être le 23/10, parce que le pod de charge n'a jamais été supprimé et que le CPU est resté à 72 %. Le HPA avait raison : la charge était toujours là. D'où la charge qui s'arrête d'elle-même ci-dessous.
+
+**Le montrer**
 ```bash
-kubectl -n poll-app get hpa -w &
-kubectl -n poll-app run load --image=busybox:1.37 --restart=Never -- sh -c 'while true; do wget -q -O /dev/null http://poll; done'
-# ~1 min plus tard : REPLICAS passe à 4. Arrêter la charge :
-kubectl -n poll-app delete pod load    # retour à 2 pods ~5 min après
+kubectl -n poll-app get hpa poll -w &
+kubectl -n poll-app run load --image=busybox:1.37 --restart=Never -- sh -c 'fin=$(( $(date +%s) + 180 )); while [ "$(date +%s)" -lt "$fin" ]; do wget -q -O /dev/null http://poll; done'
+# ~2 min plus tard : REPLICAS passe à 3. La charge s'arrête seule au bout de 3 min,
+# et poll revient à 2 pods ~6 min après.
+kubectl -n poll-app delete pod load    # ménage, une fois la démo finie
 ```
 
 ## 12. Mise à jour sans interruption
@@ -325,7 +336,7 @@ Une suite de mécanismes, chacun couvrant un moment de la mise à jour :
 
 Le preStop divise les erreurs par 7 sous forte concurrence. Ce qui reste vient surtout de la saturation volontaire des pods.
 
-**Sur AKS**, le premier essai (22/10) a donné 60 erreurs sur 350 requêtes, toutes sur poll, à cause de son worker gunicorn unique ([§ 5](#5-probes)). Après la correction, le même scénario sur k3s, avec des connexions muettes en plus, donne 0 erreur sur 4 528 requêtes.
+**Sur AKS**, le premier essai (22/10) a donné 60 erreurs sur 350 requêtes, toutes sur poll, à cause de son worker gunicorn unique ([§ 5](#5-probes)). Après la correction (23/10), le même test donne **1 165 requêtes, 0 erreur**, et 0 erreur aussi pendant le drain d'un nœud. Le pod Redis est resté le même du début à la fin : les mises à jour ne le redémarrent plus.
 
 Sur ce cluster local, la boucle de requêtes successives (le test de la soutenance) donnait aussi 0 erreur **sans** preStop : sur une seule machine, le retrait d'un pod se propage presque instantanément. Sur AKS, il faut en plus prévenir le kube-proxy de chaque VM et le load balancer Azure. C'est ce délai que le preStop couvre.
 
@@ -335,13 +346,13 @@ Comme les 3 images partagent le même tag, modifier un seul service redémarre a
 
 | Scénario | Ce qui se passe |
 |---|---|
-| `kubectl drain <nœud>` | Le PDB n'autorise l'éviction d'un pod poll ou result que s'il en reste un autre prêt. L'anti-affinité garantit que ce pod est sur l'autre nœud. Les pods évincés sont recréés sur le nœud restant. **Testé sur k3s : 0 erreur.** Sur AKS, les PDB des pods système (coredns, metrics-server, konnectivity) font patienter le drain quelques dizaines de secondes (`Cannot evict pod as it would violate the pod's disruption budget`, puis nouvelle tentative) : c'est le même mécanisme que le nôtre. Les pods ne reviennent pas d'eux-mêmes après `kubectl uncordon` : il faut un `kubectl rollout restart` pour rééquilibrer. |
+| `kubectl drain <nœud>` | Le PDB n'autorise l'éviction d'un pod poll ou result que s'il en reste un autre prêt. L'anti-affinité garantit que ce pod est sur l'autre nœud. Les pods évincés sont recréés sur le nœud restant. **Testé sur k3s et sur AKS : 0 erreur.** Sur AKS, les PDB des pods système (coredns, metrics-server, konnectivity) font patienter le drain quelques dizaines de secondes (`Cannot evict pod as it would violate the pod's disruption budget`, puis nouvelle tentative) : c'est le même mécanisme que le nôtre. Les pods ne reviennent pas d'eux-mêmes après `kubectl uncordon` : il faut un `kubectl rollout restart` pour rééquilibrer. |
 | Drain du nœud de Redis | Redis est recréé ailleurs en quelques secondes (pas de disque à déplacer). Pendant ce temps, les votes échouent. Au-delà de 15 s, poll devient non prêt ([5](#5-probes)). |
 | Drain du nœud de Postgres | `postgres-0` est recréé ailleurs, et le disque Azure est détaché puis rattaché. **Mesuré sur AKS** : `postgres-0` prêt sur l'autre nœud 85 s après le début du drain, dont 15 s à attendre la libération du disque (`Multi-Attach error`). result a été injoignable environ 30 s ; les votes ont attendu dans Redis. |
 | Le worker plante | Le kubelet le redémarre (`restartPolicy: Always`) ; les votes attendent dans Redis. **Testé.** |
 | `kubectl delete pod postgres-0` | Recréé sur le même PVC, sans perte de données. **Testé sur AKS : prêt en 10 s.** |
 | Un nœud s'éteint | En moins d'une minute, il est déclaré `NotReady` et ses pods sont retirés des Services : les replicas de l'autre nœud prennent tout le trafic. Après 5 min, ces pods sont recréés ailleurs. Si l'autre nœud manque de place, l'autoscaler ajoute un nœud. |
-| Pic de trafic | Le HPA monte jusqu'à 4 pods. **Testé : 2 → 4.** |
+| Pic de trafic | Le HPA monte jusqu'à 4 pods. **Testé : 2 → 3 sur AKS, 2 → 4 sur k3s** ([11](#11-auto-scaling)). |
 
 ## 14. Plateforme et outils
 
