@@ -173,19 +173,33 @@ kubectl -n poll-app get pods          # RESTARTS du worker passe à 1
 
 ## Justification - Resource limits
 
-| Service | Où |
-|---|---|
-| poll | [values.yaml:38-44](../deploy/helm/poll-app/values.yaml#L38-L44) |
-| result | [values.yaml:53-59](../deploy/helm/poll-app/values.yaml#L53-L59) |
-| worker | [values.yaml:65-73](../deploy/helm/poll-app/values.yaml#L65-L73) |
-| redis | [values.yaml:79-86](../deploy/helm/poll-app/values.yaml#L79-L86) |
-| postgres | [values.yaml:101-108](../deploy/helm/poll-app/values.yaml#L101-L108) |
+- `requests` : ce que Kubernetes **réserve** pour le pod sur un nœud.
+- `limits` : le **maximum** autorisé. Au-delà, le CPU est ralenti, et la mémoire fait tuer puis relancer le pod.
+
+On a mesuré chaque service avec `docker stats`, au repos puis sous charge (30 s de requêtes en continu), puis choisi les valeurs à partir de ces mesures :
+
+| Service | Où | RAM mesurée (pic) | requests CPU / RAM | limits CPU / RAM | Pourquoi ces chiffres |
+|---|---|---|---|---|---|
+| poll | [values.yaml:38-44](../deploy/helm/poll-app/values.yaml#L38-L44) | 51 Mi | 100m / 64Mi | 500m / 128Mi | à 500m, un pod tient 220 votes/s ; au-delà, le HPA ajoute des pods |
+| result | [values.yaml:53-59](../deploy/helm/poll-app/values.yaml#L53-L59) | 120 Mi | 100m / 128Mi | 500m / 256Mi | à 500m, un pod tient 2 900 requêtes/s |
+| worker | [values.yaml:65-73](../deploy/helm/poll-app/values.yaml#L65-L73) | 114 Mi | 100m / 192Mi | 1000m / 512Mi | Java a besoin de plus de mémoire ; 1 CPU pour démarrer plus vite |
+| redis | [values.yaml:79-86](../deploy/helm/poll-app/values.yaml#L79-L86) | 9 Mi | 50m / 32Mi | 250m / 128Mi | 128 Mi = environ 1 million de votes en attente si le worker est arrêté |
+| postgres | [values.yaml:101-108](../deploy/helm/poll-app/values.yaml#L101-L108) | 38 Mi | 100m / 128Mi | 1000m / 512Mi | son cache grossit avec les données (128 Mo par défaut) |
+
+**La règle appliquée partout**
+- **RAM réservée ≥ pic mesuré** : le pod a toujours la mémoire dont il a besoin.
+- **RAM max ≈ 2 × la réservée** : de la marge pour les pics. Si on la dépasse, c'est une fuite : mieux vaut relancer le pod que bloquer le nœud.
+- **CPU réservé petit (100m)** : un pod qui manque de CPU ralentit, il ne plante pas. C'est aussi la base du HPA (70 % de 100m).
+- **CPU max** : nos VM (B2s_v2) n'ont pas de CPU illimité dans la durée. Un pod ne doit pas tout prendre aux autres.
+
+**Résultat** : nos pods réservent 0,65 CPU et 736 Mi en tout, et un nœud en offre 1,9 CPU et 5,6 Gi. Tout tient donc sur un seul nœud, même pendant un drain.
 
 ```bash
 kubectl -n poll-app top pods          # consommation réelle, sous les valeurs réservées
+kubectl describe nodes | grep -A8 'Allocated resources'
 ```
 
-**Pourquoi** : `requests` est ce que Kubernetes réserve pour le pod, `limits` est le maximum autorisé. Les valeurs viennent de mesures sous charge ([choices.md § 7](choices.md#7-ressources-requests-et-limits)).
+Le détail des mesures est dans [choices.md § 7](choices.md#7-ressources-requests-et-limits).
 
 **Limiter le CPU de Redis** : changer `cpu` en [values.yaml:85](../deploy/helm/poll-app/values.yaml#L85), puis relancer `deploy/deploy.sh`.
 
