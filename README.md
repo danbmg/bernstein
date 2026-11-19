@@ -1,5 +1,7 @@
 # Bernstein : déploiement de l'application Poll sur Kubernetes
 
+> 🎓 Projet Epitech (3e année, Epitech Nice, 2026), réalisé en équipe.
+
 Une seule commande fait tout le chemin, du code source au cluster :
 1. **build** des 3 images (poll, result, worker) ;
 2. **push** dans un registre privé (Azure Container Registry) ;
