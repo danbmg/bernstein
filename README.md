@@ -45,7 +45,7 @@ Aucun secret n'est stocké dans ce dépôt.
 ## Déploiement initial (cluster vierge)
 
 ```bash
-git clone <ce dépôt> bernstein && cd bernstein
+git clone https://github.com/danbmg/bernstein.git && cd bernstein
 az login
 export RESOURCE_GROUP=<resource group du cluster> AKS_NAME=<nom du cluster> ACR_NAME=<nom du registre>
 export POSTGRES_PASSWORD='<mot de passe>'
@@ -121,7 +121,15 @@ deploy/deploy.sh --local
 
 Le script utilise le registre interne de minikube et metrics-server (nécessaire au HPA). poll et result sont exposés en NodePort.
 
-`docker compose up --build` lance aussi l'application seule, sans Kubernetes (voir `docker-compose.yml`).
+Sans Kubernetes, `docker compose` lance l'application seule :
+
+```bash
+cp .env.example .env        # puis renseigner POSTGRES_PASSWORD et REDIS_PASSWORD
+docker compose up --build   # poll : http://localhost:8080, result : http://localhost:8081
+docker compose down -v      # arrête tout et supprime la base
+```
+
+Sur Fedora ou RHEL (SELinux actif), Postgres s'arrête avec `schema.sql: Permission denied` : ajouter `,z` à la fin du montage de `schema.sql` dans `docker-compose.yml` (`…/schema.sql:ro,z`).
 
 ## Nettoyage
 
